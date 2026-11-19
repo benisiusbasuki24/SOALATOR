@@ -1,0 +1,6 @@
+{
+  "name": "soalator bogota",
+  "description": "Aplikasi generator soal ujian otomatis berbasis Kurikulum Deep Learning dan Nilai Kebopkrian lengkap dengan kisi-kisi, kunci jawaban, dan ekspor PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

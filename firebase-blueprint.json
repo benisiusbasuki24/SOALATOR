@@ -1,0 +1,36 @@
+{
+  "entities": {
+    "Exam": {
+      "description": "Saved generated exams and test papers",
+      "properties": {
+        "id": { "type": "string", "description": "Unique exam ID" },
+        "userId": { "type": "string", "description": "ID of the user who created the exam" },
+        "title": { "type": "string", "description": "Exam title or subject name" },
+        "schoolIdentity": {
+          "type": "object",
+          "description": "School and exam administrative metadata"
+        },
+        "settings": {
+          "type": "object",
+          "description": "Question difficulty and type breakdown settings"
+        },
+        "materialSummary": { "type": "string", "description": "Summary or source text of uploaded materials" },
+        "questions": {
+          "type": "array",
+          "description": "Generated questions list with kisi-kisi, answers, and discussions"
+        },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" }
+      },
+      "required": ["id", "userId", "title", "schoolIdentity", "questions", "createdAt"]
+    }
+  },
+  "firestore": {
+    "collections": {
+      "exams": {
+        "schema": "Exam",
+        "access": "owner"
+      }
+    }
+  }
+}
