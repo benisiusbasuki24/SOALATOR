@@ -47,7 +47,7 @@ function getFirebaseApiKey(): string {
 }
 
 const FIREBASE_API_KEY = getFirebaseApiKey();
-const SUPERADMIN_EMAILS = ['ppdb.sdbogota@gmail.com'];
+const SUPERADMIN_EMAILS = ['ppdb.sdbogota@gmail.com', 'soalator.admin@soalator.local'];
 
 interface StoredUser {
   id: string;
@@ -81,6 +81,35 @@ function hashPassword(password: string, salt?: string): string {
   const derived = crypto.scryptSync(password, usedSalt, 64).toString('hex');
   return `${usedSalt}:${derived}`;
 }
+
+function getStoredUsers(): StoredUser[] {
+  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const adminIndex = users.findIndex((u) => u.username.toLowerCase() === 'soalator.admin');
+  const defaultAdminHash = hashPassword('admin12345');
+  if (adminIndex === -1) {
+    const adminUser: StoredUser = {
+      id: 'usr_soalator_admin',
+      username: 'soalator.admin',
+      email: 'soalator.admin@soalator.local',
+      displayName: 'Superadmin Soalator',
+      role: 'superadmin',
+      schoolName: 'Bogota Academic Center',
+      active: true,
+      passwordHash: defaultAdminHash,
+      createdAt: new Date().toISOString(),
+    };
+    users.unshift(adminUser);
+    writeJsonFile(USERS_FILE, users);
+  } else {
+    if (users[adminIndex].role !== 'superadmin' || !users[adminIndex].active) {
+      users[adminIndex].role = 'superadmin';
+      users[adminIndex].active = true;
+      writeJsonFile(USERS_FILE, users);
+    }
+  }
+  return users;
+}
+
 
 function verifyPassword(password: string, storedHash: string): boolean {
   const parts = storedHash.split(':');
@@ -174,7 +203,7 @@ async function resolveAuthUser(req: express.Request): Promise<AuthenticatedUser 
   if (token.startsWith('local.')) {
     const session = verifySessionToken(token);
     if (!session) return null;
-    const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+    const users = getStoredUsers();
     const found = users.find((u) => u.id === session.uid);
     if (!found || !found.active) return null;
     return {
@@ -221,7 +250,7 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(400).json({ error: 'Username/Email dan kata sandi wajib diisi.' });
   }
 
-  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const users = getStoredUsers();
   const userIndex = users.findIndex(
     (u) =>
       u.username.toLowerCase() === cleanIdentifier ||
@@ -282,7 +311,7 @@ app.get('/api/admin/users', async (req, res) => {
   if (!authUser || authUser.role !== 'superadmin') {
     return res.status(403).json({ error: 'Akses ditolak. Hanya Superadmin yang diizinkan.' });
   }
-  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const users = getStoredUsers();
   return res.json({ users: users.map(sanitizeUser) });
 });
 
@@ -312,7 +341,7 @@ app.post('/api/admin/users', async (req, res) => {
     return res.status(400).json({ error: 'Kata sandi minimal 6 karakter.' });
   }
 
-  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const users = getStoredUsers();
   const duplicate = users.find(
     (u) =>
       u.username.toLowerCase() === cleanUsername.toLowerCase() ||
@@ -347,7 +376,7 @@ app.patch('/api/admin/users/:id', async (req, res) => {
   }
 
   const targetId = req.params.id;
-  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const users = getStoredUsers();
   const idx = users.findIndex((u) => u.id === targetId);
   if (idx === -1) {
     return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
@@ -380,7 +409,7 @@ app.delete('/api/admin/users/:id', async (req, res) => {
   }
 
   const targetId = req.params.id;
-  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const users = getStoredUsers();
   const nextUsers = users.filter((u) => u.id !== targetId);
   if (nextUsers.length === users.length) {
     return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
