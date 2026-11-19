@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { ExamForm } from './components/ExamForm';
 import { ExamPreview } from './components/ExamPreview';
@@ -6,8 +6,8 @@ import { SavedExamsModal } from './components/SavedExamsModal';
 import { AuthLanding } from './components/AuthLanding';
 import { SuperadminDashboard } from './components/SuperadminDashboard';
 import { GenerationProcessView, GenerationProgressState } from './components/GenerationProcessView';
-import { SchoolIdentity, ExamSettings, ExamData } from './types';
-import { db, auth, onAuthStateChanged, testConnection, User } from './firebase';
+import { SchoolIdentity, ExamSettings, ExamData, AppUser } from './types';
+import { db, auth, onAuthStateChanged, signOut, testConnection } from './firebase';
 import { collection, addDoc, getDocs, deleteDoc, doc, query, where, getDoc } from 'firebase/firestore';
 
 interface PendingGenerationRequest {
@@ -16,15 +16,16 @@ interface PendingGenerationRequest {
   materialText: string;
 }
 
+const SESSION_TOKEN_KEY = 'soalator_auth_token';
+
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [appUser, setAppUser] = useState<AppUser | null>(null);
   const [authChecked, setAuthChecked] = useState<boolean>(false);
   const [view, setView] = useState<'form' | 'generating' | 'preview' | 'superadmin'>('form');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [currentExam, setCurrentExam] = useState<ExamData | null>(null);
   const [savedExams, setSavedExams] = useState<ExamData[]>([]);
   const [isSavedModalOpen, setIsSavedModalOpen] = useState<boolean>(false);
-  const [isSuperadmin, setIsSuperadmin] = useState<boolean>(false);
   const [pendingRequest, setPendingRequest] = useState<PendingGenerationRequest | null>(null);
   const [autoSaved, setAutoSaved] = useState<boolean>(false);
   const [generationState, setGenerationState] = useState<GenerationProgressState>({
@@ -41,79 +42,215 @@ export default function App() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const autoRedirectTimerRef = useRef<number | null>(null);
 
+  const getAuthToken = useCallback(async (): Promise<string | null> => {
+    const localToken = localStorage.getItem(SESSION_TOKEN_KEY);
+    if (localToken) return localToken;
+    if (auth.currentUser) {
+      try {
+        return await auth.currentUser.getIdToken();
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }, []);
+
+  const fetchSavedExams = useCallback(
+    async (userObj: AppUser) => {
+      const merged = new Map<string, ExamData>();
+
+      // Fetch from server archive
+      try {
+        const token = await getAuthToken();
+        if (token) {
+          const resp = await fetch('/api/exams', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            for (const ex of data.exams || []) {
+              if (ex.id) merged.set(ex.id, ex);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Server saved exams fetch skipped:', err);
+      }
+
+      // Fetch from Firestore if signed in via Firebase
+      if (auth.currentUser) {
+        try {
+          const q = query(collection(db, 'exams'), where('userId', '==', userObj.uid));
+          const querySnapshot = await getDocs(q);
+          querySnapshot.forEach((docSnap) => {
+            merged.set(docSnap.id, { id: docSnap.id, ...docSnap.data() } as ExamData);
+          });
+        } catch (error) {
+          console.warn('Firestore saved exams fetch skipped:', error);
+        }
+      }
+
+      setSavedExams(Array.from(merged.values()));
+    },
+    [getAuthToken]
+  );
+
   useEffect(() => {
     testConnection().catch(console.warn);
 
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      setAuthChecked(true);
-      if (currentUser) {
-        const superadminEmails = ['ppdb.sdbogota@gmail.com'];
-        const isSuper = superadminEmails.includes(currentUser.email || '');
-        if (!isSuper) {
-          try {
-            const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
-            if (userDoc.exists() && userDoc.data().role === 'superadmin') {
-              setIsSuperadmin(true);
-            } else {
-              setIsSuperadmin(false);
-            }
-          } catch {
-            setIsSuperadmin(false);
+    let active = true;
+
+    const restoreCredentialSession = async () => {
+      const token = localStorage.getItem(SESSION_TOKEN_KEY);
+      if (!token) return false;
+      try {
+        const resp = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (active && data.user) {
+            setAppUser(data.user as AppUser);
+            setAuthChecked(true);
+            fetchSavedExams(data.user as AppUser);
+            return true;
           }
         } else {
-          setIsSuperadmin(true);
+          localStorage.removeItem(SESSION_TOKEN_KEY);
+        }
+      } catch {
+        // ignore
+      }
+      return false;
+    };
+
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (!active) return;
+
+      if (fbUser) {
+        localStorage.removeItem(SESSION_TOKEN_KEY);
+        const superadminEmails = ['ppdb.sdbogota@gmail.com'];
+        let role: 'teacher' | 'superadmin' = superadminEmails.includes(fbUser.email || '')
+          ? 'superadmin'
+          : 'teacher';
+
+        if (role !== 'superadmin') {
+          try {
+            const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
+            if (userDoc.exists() && userDoc.data().role === 'superadmin') {
+              role = 'superadmin';
+            }
+          } catch {
+            // ignore
+          }
         }
 
-        fetchSavedExams(currentUser.uid);
+        const unified: AppUser = {
+          uid: fbUser.uid,
+          email: fbUser.email || '',
+          displayName: fbUser.displayName || fbUser.email || 'Pengguna Google',
+          photoURL: fbUser.photoURL,
+          role,
+          authMethod: fbUser.providerData?.[0]?.providerId === 'password' ? 'firebase-email' : 'google',
+        };
+        setAppUser(unified);
+        setAuthChecked(true);
+        fetchSavedExams(unified);
       } else {
-        setSavedExams([]);
-        setIsSuperadmin(false);
+        const restored = await restoreCredentialSession();
+        if (!restored && active) {
+          setAppUser(null);
+          setSavedExams([]);
+          setAuthChecked(true);
+        }
       }
     });
 
     return () => {
+      active = false;
       unsubscribe();
       if (autoRedirectTimerRef.current) {
         window.clearTimeout(autoRedirectTimerRef.current);
       }
       abortControllerRef.current?.abort();
     };
-  }, []);
+  }, [fetchSavedExams]);
 
-  const fetchSavedExams = async (uid: string) => {
-    try {
-      const q = query(collection(db, 'exams'), where('userId', '==', uid));
-      const querySnapshot = await getDocs(q);
-      const examsList: ExamData[] = [];
-      querySnapshot.forEach((docSnap) => {
-        examsList.push({ id: docSnap.id, ...docSnap.data() } as ExamData);
-      });
-      setSavedExams(examsList);
-    } catch (error) {
-      console.error('Error fetching saved exams:', error);
+  const handleCredentialLogin = (token: string, user: AppUser) => {
+    localStorage.setItem(SESSION_TOKEN_KEY, token);
+    setAppUser(user);
+    setAuthChecked(true);
+    setView('form');
+    fetchSavedExams(user);
+  };
+
+  const handleLogout = async () => {
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+    if (auth.currentUser) {
+      try {
+        await signOut(auth);
+      } catch (error) {
+        console.error('Logout error:', error);
+      }
     }
+    setAppUser(null);
+    setSavedExams([]);
+    setView('form');
+  };
+
+  const persistExamRecord = async (examToSave: ExamData): Promise<ExamData> => {
+    if (!appUser) return examToSave;
+    const examPayload = {
+      ...examToSave,
+      userId: appUser.uid,
+      updatedAt: new Date().toISOString(),
+    };
+
+    let savedRecord: ExamData = examPayload;
+
+    // Save to server archive
+    const token = await getAuthToken();
+    if (token) {
+      const resp = await fetch('/api/exams', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(examPayload),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.exam) savedRecord = data.exam;
+      }
+    }
+
+    // Also save to Firestore if signed into Firebase
+    if (auth.currentUser) {
+      try {
+        const savePromise = addDoc(collection(db, 'exams'), examPayload);
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Firestore save timeout')), 5000)
+        );
+        const docRef = await Promise.race([savePromise, timeoutPromise]);
+        savedRecord = { ...savedRecord, id: savedRecord.id || docRef.id };
+      } catch (fsErr) {
+        console.warn('Firestore save warning:', fsErr);
+      }
+    }
+
+    return savedRecord;
   };
 
   const tryAutoSaveExam = async (examToSave: ExamData): Promise<ExamData> => {
-    if (!user) return examToSave;
+    if (!appUser) return examToSave;
     try {
-      const examPayload = {
-        ...examToSave,
-        userId: user.uid,
-        updatedAt: new Date().toISOString(),
-      };
-      const savePromise = addDoc(collection(db, 'exams'), examPayload);
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Firestore save timeout')), 5000)
-      );
-      const docRef = await Promise.race([savePromise, timeoutPromise]);
-      const savedWithId = { ...examPayload, id: docRef.id };
-      setSavedExams((prev) => [savedWithId, ...prev]);
+      const saved = await persistExamRecord(examToSave);
+      setSavedExams((prev) => [saved, ...prev.filter((ex) => ex.id !== saved.id)]);
       setAutoSaved(true);
-      return savedWithId;
+      return saved;
     } catch (error) {
-      console.warn('Auto-save skipped or offline:', error);
+      console.warn('Auto-save skipped:', error);
       return examToSave;
     }
   };
@@ -241,7 +378,7 @@ export default function App() {
         materialSummary: materialText.slice(0, 300),
         questions: completedExamPayload.questions || [],
         createdAt: new Date().toISOString(),
-        userId: user ? user.uid : 'guest',
+        userId: appUser ? appUser.uid : 'guest',
       };
 
       const savedOrRawExam = await tryAutoSaveExam(rawExam);
@@ -296,22 +433,15 @@ export default function App() {
   };
 
   const handleSaveExam = async (examToSave: ExamData) => {
-    if (!user) {
+    if (!appUser) {
       alert('Silakan masuk terlebih dahulu.');
       return;
     }
 
     try {
-      const examPayload = {
-        ...examToSave,
-        userId: user.uid,
-        updatedAt: new Date().toISOString(),
-      };
-
-      const docRef = await addDoc(collection(db, 'exams'), examPayload);
-      const savedWithId = { ...examPayload, id: docRef.id };
-      setCurrentExam(savedWithId);
-      setSavedExams((prev) => [savedWithId, ...prev]);
+      const saved = await persistExamRecord(examToSave);
+      setCurrentExam(saved);
+      setSavedExams((prev) => [saved, ...prev.filter((ex) => ex.id !== saved.id)]);
       alert('Soal ujian berhasil disimpan ke akun Anda!');
     } catch (error) {
       console.error('Error saving exam:', error);
@@ -321,7 +451,16 @@ export default function App() {
 
   const handleDeleteExam = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'exams', id));
+      const token = await getAuthToken();
+      if (token) {
+        await fetch(`/api/exams/${id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => {});
+      }
+      if (auth.currentUser) {
+        await deleteDoc(doc(db, 'exams', id)).catch(() => {});
+      }
       setSavedExams((prev) => prev.filter((ex) => ex.id !== id));
     } catch (error) {
       console.error('Error deleting exam:', error);
@@ -337,9 +476,11 @@ export default function App() {
     );
   }
 
-  if (!user) {
-    return <AuthLanding />;
+  if (!appUser) {
+    return <AuthLanding onCredentialLogin={handleCredentialLogin} />;
   }
+
+  const isSuperadmin = appUser.role === 'superadmin';
 
   if (view === 'superadmin' && isSuperadmin) {
     return (
@@ -349,6 +490,7 @@ export default function App() {
           setCurrentExam(exam);
           setView('preview');
         }}
+        getAuthToken={getAuthToken}
       />
     );
   }
@@ -356,6 +498,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-100 text-slate-950 flex flex-col font-sans">
       <Navbar
+        user={appUser}
+        onLogout={handleLogout}
         onOpenSavedExams={() => setIsSavedModalOpen(true)}
         savedCount={savedExams.length}
         isSuperadmin={isSuperadmin}

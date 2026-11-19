@@ -1,36 +1,45 @@
 {
   "entities": {
     "Exam": {
+      "title": "Exam",
       "description": "Saved generated exams and test papers",
+      "type": "object",
       "properties": {
         "id": { "type": "string", "description": "Unique exam ID" },
         "userId": { "type": "string", "description": "ID of the user who created the exam" },
-        "title": { "type": "string", "description": "Exam title or subject name" },
-        "schoolIdentity": {
-          "type": "object",
-          "description": "School and exam administrative metadata"
-        },
-        "settings": {
-          "type": "object",
-          "description": "Question difficulty and type breakdown settings"
-        },
-        "materialSummary": { "type": "string", "description": "Summary or source text of uploaded materials" },
-        "questions": {
-          "type": "array",
-          "description": "Generated questions list with kisi-kisi, answers, and discussions"
-        },
+        "title": { "type": "string", "description": "Exam title or subject name", "maxLength": 300 },
+        "schoolIdentity": { "type": "object", "description": "School and exam administrative metadata" },
+        "settings": { "type": "object", "description": "Question difficulty and type breakdown settings" },
+        "materialSummary": { "type": "string", "description": "Summary or source text of uploaded materials", "maxLength": 2000 },
+        "questions": { "type": "array", "description": "Generated questions list with kisi-kisi, answers, and discussions" },
         "createdAt": { "type": "string", "description": "Creation timestamp" },
         "updatedAt": { "type": "string", "description": "Last update timestamp" }
       },
-      "required": ["id", "userId", "title", "schoolIdentity", "questions", "createdAt"]
+      "required": ["userId", "title", "schoolIdentity", "questions", "createdAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Registered teacher or superadmin user profile",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user ID" },
+        "email": { "type": "string", "description": "User email address", "maxLength": 200 },
+        "displayName": { "type": "string", "description": "User full display name", "maxLength": 150 },
+        "role": { "type": "string", "enum": ["teacher", "superadmin"], "description": "User role" },
+        "lastLogin": { "type": "string", "description": "Last login timestamp" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["uid", "email", "displayName", "role"]
     }
   },
   "firestore": {
-    "collections": {
-      "exams": {
-        "schema": "Exam",
-        "access": "owner"
-      }
+    "/exams/{examId}": {
+      "schema": { "$ref": "#/entities/Exam" },
+      "description": "Collection of generated exams owned by teachers and overseen by superadmins"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Collection of user profiles"
     }
   }
 }

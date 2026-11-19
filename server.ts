@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
@@ -10,11 +12,457 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const DATA_DIR = path.resolve(__dirname, '.data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const EXAMS_FILE = path.join(DATA_DIR, 'exams.json');
+const SECRET_FILE = path.join(DATA_DIR, '.session_secret');
+
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function getSessionSecret(): string {
+  if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim() !== '') {
+    return process.env.SESSION_SECRET.trim();
+  }
+  if (fs.existsSync(SECRET_FILE)) {
+    return fs.readFileSync(SECRET_FILE, 'utf-8').trim();
+  }
+  const secret = crypto.randomBytes(32).toString('hex');
+  fs.writeFileSync(SECRET_FILE, secret, { mode: 0o600 });
+  return secret;
+}
+
+const SESSION_SECRET = getSessionSecret();
+
+function getFirebaseApiKey(): string {
+  try {
+    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      return cfg.apiKey || '';
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+const FIREBASE_API_KEY = getFirebaseApiKey();
+const SUPERADMIN_EMAILS = ['ppdb.sdbogota@gmail.com'];
+
+interface StoredUser {
+  id: string;
+  username: string;
+  email: string;
+  displayName: string;
+  role: 'teacher' | 'superadmin';
+  schoolName?: string;
+  active: boolean;
+  passwordHash: string;
+  createdAt: string;
+  lastLogin?: string;
+}
+
+function readJsonFile<T>(filePath: string, fallback: T): T {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile<T>(filePath: string, data: T): void {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+function hashPassword(password: string, salt?: string): string {
+  const usedSalt = salt || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, usedSalt, 64).toString('hex');
+  return `${usedSalt}:${derived}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 2) return false;
+  const [salt, keyHex] = parts;
+  if (!salt || !keyHex) return false;
+  const derived = crypto.scryptSync(password, salt, 64);
+  const keyBuf = Buffer.from(keyHex, 'hex');
+  if (derived.length !== keyBuf.length) return false;
+  return crypto.timingSafeEqual(derived, keyBuf);
+}
+
+interface SessionPayload {
+  uid: string;
+  username: string;
+  email: string;
+  displayName: string;
+  role: 'teacher' | 'superadmin';
+  exp: number;
+}
+
+function signSessionToken(payload: SessionPayload): string {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  return `local.${encoded}.${sig}`;
+}
+
+function verifySessionToken(token: string): SessionPayload | null {
+  if (!token.startsWith('local.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, encoded, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8')) as SessionPayload;
+    if (!decoded.exp || decoded.exp < Date.now()) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<{ uid: string; email: string; displayName: string; role: 'teacher' | 'superadmin' } | null> {
+  if (!FIREBASE_API_KEY || !idToken) return null;
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!resp.ok) return null;
+    const data: any = await resp.json();
+    const fbUser = data?.users?.[0];
+    if (!fbUser || !fbUser.localId) return null;
+    const email = (fbUser.email || '').toLowerCase();
+    const isSuper = SUPERADMIN_EMAILS.includes(email) && fbUser.emailVerified !== false;
+    return {
+      uid: fbUser.localId,
+      email: fbUser.email || '',
+      displayName: fbUser.displayName || fbUser.email || 'Pengguna Google',
+      role: isSuper ? 'superadmin' : 'teacher',
+    };
+  } catch {
+    return null;
+  }
+}
+
+interface AuthenticatedUser {
+  uid: string;
+  username?: string;
+  email: string;
+  displayName: string;
+  role: 'teacher' | 'superadmin';
+  schoolName?: string;
+  authMethod: 'google' | 'credentials';
+}
+
+async function resolveAuthUser(req: express.Request): Promise<AuthenticatedUser | null> {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token) return null;
+
+  if (token.startsWith('local.')) {
+    const session = verifySessionToken(token);
+    if (!session) return null;
+    const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+    const found = users.find((u) => u.id === session.uid);
+    if (!found || !found.active) return null;
+    return {
+      uid: found.id,
+      username: found.username,
+      email: found.email,
+      displayName: found.displayName,
+      role: found.role,
+      schoolName: found.schoolName,
+      authMethod: 'credentials',
+    };
+  }
+
+  const fbUser = await verifyFirebaseIdToken(token);
+  if (!fbUser) return null;
+  return {
+    uid: fbUser.uid,
+    email: fbUser.email,
+    displayName: fbUser.displayName,
+    role: fbUser.role,
+    authMethod: 'google',
+  };
+}
+
+function sanitizeUser(u: StoredUser) {
+  const { passwordHash: _ignored, ...safe } = u;
+  return safe;
+}
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
 
 const defaultApiKey = process.env.GEMINI_API_KEY || '';
+
+// --- Credential Auth Endpoints ---
+
+app.post('/api/auth/login', (req, res) => {
+  const { identifier, password } = req.body || {};
+  const cleanIdentifier = String(identifier || '').trim().toLowerCase();
+  const rawPassword = String(password || '');
+
+  if (!cleanIdentifier || !rawPassword) {
+    return res.status(400).json({ error: 'Username/Email dan kata sandi wajib diisi.' });
+  }
+
+  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const userIndex = users.findIndex(
+    (u) =>
+      u.username.toLowerCase() === cleanIdentifier ||
+      (u.email && u.email.toLowerCase() === cleanIdentifier)
+  );
+
+  if (userIndex === -1) {
+    return res.status(401).json({ error: 'Username/Email atau kata sandi salah.' });
+  }
+
+  const user = users[userIndex];
+  if (!user.active) {
+    return res.status(403).json({ error: 'Akun Anda sedang dinonaktifkan oleh Superadmin.' });
+  }
+
+  if (!verifyPassword(rawPassword, user.passwordHash)) {
+    return res.status(401).json({ error: 'Username/Email atau kata sandi salah.' });
+  }
+
+  users[userIndex] = { ...user, lastLogin: new Date().toISOString() };
+  writeJsonFile(USERS_FILE, users);
+
+  const token = signSessionToken({
+    uid: user.id,
+    username: user.username,
+    email: user.email,
+    displayName: user.displayName,
+    role: user.role,
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  });
+
+  return res.json({
+    token,
+    user: {
+      uid: user.id,
+      username: user.username,
+      email: user.email,
+      displayName: user.displayName,
+      role: user.role,
+      schoolName: user.schoolName,
+      authMethod: 'credentials',
+    },
+  });
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser) {
+    return res.status(401).json({ error: 'Sesi tidak valid atau telah berakhir.' });
+  }
+  return res.json({ user: authUser });
+});
+
+// --- Superadmin User Management Endpoints ---
+
+app.get('/api/admin/users', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser || authUser.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Akses ditolak. Hanya Superadmin yang diizinkan.' });
+  }
+  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  return res.json({ users: users.map(sanitizeUser) });
+});
+
+app.post('/api/admin/users', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser || authUser.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Akses ditolak. Hanya Superadmin yang diizinkan.' });
+  }
+
+  const { username, email, password, displayName, role, schoolName } = req.body || {};
+  const cleanUsername = String(username || '').trim();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanName = String(displayName || '').trim();
+  const rawPassword = String(password || '');
+  const userRole: 'teacher' | 'superadmin' = role === 'superadmin' ? 'superadmin' : 'teacher';
+
+  if (!cleanUsername || cleanUsername.length < 3) {
+    return res.status(400).json({ error: 'Username minimal 3 karakter.' });
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(cleanUsername)) {
+    return res.status(400).json({ error: 'Username hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung.' });
+  }
+  if (!cleanName) {
+    return res.status(400).json({ error: 'Nama lengkap wajib diisi.' });
+  }
+  if (rawPassword.length < 6) {
+    return res.status(400).json({ error: 'Kata sandi minimal 6 karakter.' });
+  }
+
+  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const duplicate = users.find(
+    (u) =>
+      u.username.toLowerCase() === cleanUsername.toLowerCase() ||
+      (cleanEmail && u.email && u.email.toLowerCase() === cleanEmail)
+  );
+  if (duplicate) {
+    return res.status(409).json({ error: 'Username atau email sudah terdaftar.' });
+  }
+
+  const newUser: StoredUser = {
+    id: `usr_${crypto.randomBytes(8).toString('hex')}`,
+    username: cleanUsername,
+    email: cleanEmail || `${cleanUsername.toLowerCase()}@soalator.local`,
+    displayName: cleanName,
+    role: userRole,
+    schoolName: String(schoolName || '').trim(),
+    active: true,
+    passwordHash: hashPassword(rawPassword),
+    createdAt: new Date().toISOString(),
+  };
+
+  users.unshift(newUser);
+  writeJsonFile(USERS_FILE, users);
+
+  return res.status(201).json({ user: sanitizeUser(newUser) });
+});
+
+app.patch('/api/admin/users/:id', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser || authUser.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Akses ditolak. Hanya Superadmin yang diizinkan.' });
+  }
+
+  const targetId = req.params.id;
+  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const idx = users.findIndex((u) => u.id === targetId);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
+  }
+
+  const { displayName, email, role, schoolName, active, password } = req.body || {};
+  const existing = users[idx];
+
+  const updated: StoredUser = {
+    ...existing,
+    displayName: displayName !== undefined ? String(displayName).trim() || existing.displayName : existing.displayName,
+    email: email !== undefined ? String(email).trim().toLowerCase() || existing.email : existing.email,
+    role: role === 'superadmin' ? 'superadmin' : role === 'teacher' ? 'teacher' : existing.role,
+    schoolName: schoolName !== undefined ? String(schoolName).trim() : existing.schoolName,
+    active: active !== undefined ? Boolean(active) : existing.active,
+    passwordHash:
+      password && String(password).length >= 6 ? hashPassword(String(password)) : existing.passwordHash,
+  };
+
+  users[idx] = updated;
+  writeJsonFile(USERS_FILE, users);
+
+  return res.json({ user: sanitizeUser(updated) });
+});
+
+app.delete('/api/admin/users/:id', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser || authUser.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Akses ditolak. Hanya Superadmin yang diizinkan.' });
+  }
+
+  const targetId = req.params.id;
+  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  const nextUsers = users.filter((u) => u.id !== targetId);
+  if (nextUsers.length === users.length) {
+    return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
+  }
+
+  writeJsonFile(USERS_FILE, nextUsers);
+  return res.json({ deleted: true });
+});
+
+// --- Server-Side Exam Persistence Endpoints (for Credential Users & Superadmin Archive) ---
+
+app.get('/api/exams', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser) {
+    return res.status(401).json({ error: 'Silakan login terlebih dahulu.' });
+  }
+
+  const allExams = readJsonFile<any[]>(EXAMS_FILE, []);
+  if (req.query.scope === 'all' && authUser.role === 'superadmin') {
+    return res.json({ exams: allExams });
+  }
+  const userExams = allExams.filter((ex) => ex.userId === authUser.uid);
+  return res.json({ exams: userExams });
+});
+
+app.post('/api/exams', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser) {
+    return res.status(401).json({ error: 'Silakan login terlebih dahulu.' });
+  }
+
+  const examBody = req.body || {};
+  const allExams = readJsonFile<any[]>(EXAMS_FILE, []);
+  const now = new Date().toISOString();
+  const examId = examBody.id || `exam_${crypto.randomBytes(8).toString('hex')}`;
+
+  const existingIdx = allExams.findIndex((ex) => ex.id === examId);
+  const record = {
+    ...examBody,
+    id: examId,
+    userId: authUser.uid,
+    authorName: authUser.displayName,
+    authorEmail: authUser.email,
+    updatedAt: now,
+    createdAt: examBody.createdAt || now,
+  };
+
+  if (existingIdx !== -1) {
+    if (allExams[existingIdx].userId !== authUser.uid && authUser.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Anda tidak berhak mengubah arsip ini.' });
+    }
+    allExams[existingIdx] = record;
+  } else {
+    allExams.unshift(record);
+  }
+
+  writeJsonFile(EXAMS_FILE, allExams);
+  return res.status(201).json({ exam: record });
+});
+
+app.delete('/api/exams/:id', async (req, res) => {
+  const authUser = await resolveAuthUser(req);
+  if (!authUser) {
+    return res.status(401).json({ error: 'Silakan login terlebih dahulu.' });
+  }
+
+  const examId = req.params.id;
+  const allExams = readJsonFile<any[]>(EXAMS_FILE, []);
+  const found = allExams.find((ex) => ex.id === examId);
+  if (!found) {
+    return res.status(404).json({ error: 'Arsip soal tidak ditemukan.' });
+  }
+  if (found.userId !== authUser.uid && authUser.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Akses ditolak.' });
+  }
+
+  const nextExams = allExams.filter((ex) => ex.id !== examId);
+  writeJsonFile(EXAMS_FILE, nextExams);
+  return res.json({ deleted: true });
+});
+
+// --- Question Generation Endpoints ---
 
 function generateFallbackExam(schoolIdentity: any, settings: any, materialText: string) {
   const subject = schoolIdentity?.mataPelajaran || 'Mata Pelajaran';
@@ -24,9 +472,10 @@ function generateFallbackExam(schoolIdentity: any, settings: any, materialText: 
   const questions: any[] = [];
   let qNum = 1;
 
-  const selectedTypes: string[] = settings?.selectedTypes && settings.selectedTypes.length > 0
-    ? settings.selectedTypes
-    : ['Pilihan Ganda', 'Uraian'];
+  const selectedTypes: string[] =
+    settings?.selectedTypes && settings.selectedTypes.length > 0
+      ? settings.selectedTypes
+      : ['Pilihan Ganda', 'Uraian'];
   const typeSettings = settings?.typeSettings || {};
 
   for (const type of selectedTypes) {
@@ -64,7 +513,9 @@ function generateFallbackExam(schoolIdentity: any, settings: any, materialText: 
           scoreWeight: isPG ? 5 : 15,
           kisiKisi: {
             kompetensiDasar: `Capaian Pembelajaran ${subject} Kurikulum Deep Learning`,
-            indikatorSoal: `Peserta didik mampu ${group.cat === 'HOTS' ? 'menganalisis dan mengevaluasi' : group.cat === 'MOTS' ? 'menerapkan' : 'memahami'} konsep ${subject} dengan nilai Kebopkrian.`,
+            indikatorSoal: `Peserta didik mampu ${
+              group.cat === 'HOTS' ? 'menganalisis dan mengevaluasi' : group.cat === 'MOTS' ? 'menerapkan' : 'memahami'
+            } konsep ${subject} dengan nilai Kebopkrian.`,
             levelKognitif: group.cat === 'HOTS' ? 'C4' : group.cat === 'MOTS' ? 'C3' : 'C2',
           },
         });
@@ -252,7 +703,6 @@ app.post('/api/generate-soal-stream', async (req, res) => {
           const matches = accumulated.match(/"questionText"\s*:/g);
           const draftedCount = matches ? matches.length : 0;
 
-          // Extract latest questionText preview if available
           const lastQMatch = [...accumulated.matchAll(/"questionText"\s*:\s*"([^"]{0,180})/g)].pop();
           const latestPreview = lastQMatch ? lastQMatch[1].replace(/\\n/g, ' ') : '';
 
@@ -276,7 +726,6 @@ app.post('/api/generate-soal-stream', async (req, res) => {
     }
 
     if (!examData) {
-      // Structured fallback with realistic step-by-step progress
       examData = generateFallbackExam(schoolIdentity, settings, materialText);
       const qList = examData.questions || [];
       for (let i = 0; i < qList.length; i++) {

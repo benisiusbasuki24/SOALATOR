@@ -58,3 +58,26 @@ export interface ExamData {
   createdAt: string;
   updatedAt?: string;
 }
+
+export interface AppUser {
+  uid: string;
+  email: string;
+  username?: string;
+  displayName: string;
+  photoURL?: string | null;
+  role: 'teacher' | 'superadmin';
+  schoolName?: string;
+  authMethod: 'google' | 'credentials' | 'firebase-email';
+}
+
+export interface RegisteredUser {
+  id: string;
+  username: string;
+  email: string;
+  displayName: string;
+  role: 'teacher' | 'superadmin';
+  schoolName?: string;
+  active: boolean;
+  createdAt: string;
+  lastLogin?: string;
+}

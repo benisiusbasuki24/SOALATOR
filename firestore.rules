@@ -1,11 +1,61 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /exams/{examId} {
-      allow read, write: if request.auth != null && (resource == null || resource.data.userId == request.auth.uid || request.resource.data.userId == request.auth.uid);
+    match /{document=**} {
+      allow read, write: if false;
     }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperadmin() {
+      return isSignedIn() &&
+        request.auth.token.email == 'ppdb.sdbogota@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidExam(data) {
+      return data.keys().hasAll(['userId', 'title', 'schoolIdentity', 'questions', 'createdAt']) &&
+        data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 300 &&
+        data.schoolIdentity is map &&
+        data.questions is list && data.questions.size() <= 100 &&
+        data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    function isValidUser(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role']) &&
+        data.uid == userId &&
+        data.email is string && data.email.size() <= 200 &&
+        data.displayName is string && data.displayName.size() <= 150 &&
+        data.role in ['teacher', 'superadmin'];
+    }
+
+    match /exams/{examId} {
+      allow get: if isSignedIn() && isValidId(examId) && (resource.data.userId == request.auth.uid || isSuperadmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isSuperadmin());
+      allow create: if isSignedIn() && isValidId(examId) && isValidExam(request.resource.data) && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(examId) && isValidExam(request.resource.data) && (resource.data.userId == request.auth.uid || isSuperadmin()) && request.resource.data.userId == resource.data.userId;
+      allow delete: if isSignedIn() && isValidId(examId) && (resource.data.userId == request.auth.uid || isSuperadmin());
+    }
+
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isSuperadmin());
+      allow list: if isSuperadmin();
+      allow create: if isSignedIn() && isValidId(userId) && isValidUser(request.resource.data, userId) && (
+        isSuperadmin() ||
+        (request.auth.uid == userId && request.resource.data.role == 'teacher')
+      );
+      allow update: if isSignedIn() && isValidId(userId) && isValidUser(request.resource.data, userId) && (
+        isSuperadmin() ||
+        (request.auth.uid == userId && request.resource.data.role == resource.data.role)
+      );
+      allow delete: if isSuperadmin() && isValidId(userId);
     }
   }
 }

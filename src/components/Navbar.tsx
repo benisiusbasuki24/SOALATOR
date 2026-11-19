@@ -1,27 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import { Sparkles, BookOpen, BookmarkCheck, LogOut, HelpCircle, ShieldAlert, Key } from 'lucide-react';
-import { auth, signOut, onAuthStateChanged, User } from '../firebase';
+import { AppUser } from '../types';
 
 interface NavbarProps {
+  user: AppUser | null;
+  onLogout: () => void;
   onOpenSavedExams: () => void;
   savedCount: number;
   isSuperadmin: boolean;
   onOpenSuperadmin: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ onOpenSavedExams, savedCount, isSuperadmin, onOpenSuperadmin }) => {
-  const [user, setUser] = useState<User | null>(null);
+export const Navbar: React.FC<NavbarProps> = ({
+  user,
+  onLogout,
+  onOpenSavedExams,
+  savedCount,
+  isSuperadmin,
+  onOpenSuperadmin,
+}) => {
   const [showInfo, setShowInfo] = useState(false);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [apiKeySaved, setApiKeySaved] = useState(false);
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-    return () => unsubscribe();
-  }, []);
 
   useEffect(() => {
     const savedKey = localStorage.getItem('user_gemini_api_key') || '';
@@ -38,36 +39,25 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSavedExams, savedCount, is
     }, 1500);
   };
 
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (error) {
-      console.error('Logout error:', error);
-    }
-  };
-
   return (
     <>
       <header className="bg-slate-900 text-white shadow-lg sticky top-0 z-50 border-b border-slate-800">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 p-2.5 rounded-xl shadow-md flex items-center justify-center text-white">
-              <Sparkles className="w-6 h-6 animate-pulse" />
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+          <div className="flex items-center space-x-3 shrink-0">
+            <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 p-2 rounded-xl shadow-md flex items-center justify-center text-white">
+              <Sparkles className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-white bg-clip-text text-transparent uppercase">
+              <h1 className="text-lg font-bold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-white bg-clip-text text-transparent uppercase whitespace-nowrap">
                 soalator bogota
               </h1>
-              <p className="text-xs text-slate-400 hidden sm:block">
-                Pembuat Soal Ujian, Kisi-Kisi, dan Pembahasan Kurikulum Deep Learning
-              </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-2.5">
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-lg text-xs font-semibold transition border border-slate-700"
+              className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-lg text-xs font-semibold transition border border-slate-700 whitespace-nowrap"
               title="API Key Pribadi (Token Mandiri)"
             >
               <Key className="w-4 h-4 text-yellow-400" />
@@ -77,7 +67,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSavedExams, savedCount, is
             {isSuperadmin && (
               <button
                 onClick={onOpenSuperadmin}
-                className="flex items-center space-x-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 px-3.5 py-2 rounded-lg text-xs font-bold transition shadow"
+                className="flex items-center space-x-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 px-3 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap"
               >
                 <ShieldAlert className="w-4 h-4 text-red-400" />
                 <span>Superadmin</span>
@@ -86,13 +76,13 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSavedExams, savedCount, is
 
             <button
               onClick={onOpenSavedExams}
-              className="relative flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-lg text-sm font-medium transition border border-slate-700"
+              className="relative flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-lg text-xs font-medium transition border border-slate-700 whitespace-nowrap"
               title="Daftar Soal Tersimpan"
             >
               <BookmarkCheck className="w-4 h-4 text-blue-400" />
               <span className="hidden md:inline">Arsip Soal</span>
               {savedCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded-full font-bold">
+                <span className="bg-blue-600 text-white text-[11px] px-1.5 py-0.2 rounded-full font-bold tabular-nums">
                   {savedCount}
                 </span>
               )}
@@ -107,20 +97,25 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSavedExams, savedCount, is
             </button>
 
             {user && (
-              <div className="flex items-center space-x-3 bg-slate-800/80 pl-3 pr-2 py-1.5 rounded-full border border-slate-700">
+              <div className="flex items-center space-x-2.5 bg-slate-800/80 pl-3 pr-2 py-1.5 rounded-full border border-slate-700">
                 {user.photoURL ? (
-                  <img src={user.photoURL} alt={user.displayName || 'User'} className="w-7 h-7 rounded-full object-cover" />
+                  <img
+                    src={user.photoURL}
+                    alt={user.displayName || 'User'}
+                    referrerPolicy="no-referrer"
+                    className="w-6 h-6 rounded-full object-cover"
+                  />
                 ) : (
-                  <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
-                    {user.displayName?.[0] || user.email?.[0] || 'U'}
+                  <div className="w-6 h-6 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
+                    {(user.displayName?.[0] || user.username?.[0] || user.email?.[0] || 'U').toUpperCase()}
                   </div>
                 )}
-                <span className="text-xs font-medium text-slate-200 hidden lg:inline max-w-[120px] truncate">
-                  {user.displayName || user.email}
+                <span className="text-xs font-medium text-slate-200 hidden lg:inline max-w-[140px] truncate">
+                  {user.displayName || user.username || user.email}
                 </span>
                 <button
-                  onClick={handleLogout}
-                  className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-slate-700/50 rounded-full transition"
+                  onClick={onLogout}
+                  className="p-1 text-slate-400 hover:text-red-400 hover:bg-slate-700/50 rounded-full transition"
                   title="Keluar"
                 >
                   <LogOut className="w-4 h-4" />
