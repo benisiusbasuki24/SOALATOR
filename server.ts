@@ -676,10 +676,10 @@ function generateFallbackExam(schoolIdentity: any, settings: any, materialText: 
     }
   }
 
-  return {
+  return normalizeExamWeights({
     title: `${category} ${subject} - ${school}`,
     questions,
-  };
+  });
 }
 
 function buildPrompt(schoolIdentity: any, settings: any, materialText: string) {
@@ -756,6 +756,54 @@ Pastikan jumlah total pertanyaan dalam array 'questions' sesuai persis dengan ko
 `;
 }
 
+function normalizeExamWeights(examData: any) {
+  if (!examData || !Array.isArray(examData.questions) || examData.questions.length === 0) {
+    return examData;
+  }
+  const questions = examData.questions;
+  const n = questions.length;
+
+  let rawWeights = questions.map((q: any) => {
+    const type = (q.type || '').toLowerCase();
+    const cat = (q.category || '').toUpperCase();
+    let base = 5;
+    if (type.includes('pilihan')) {
+      base = cat === 'HOTS' ? 6 : cat === 'MOTS' ? 5 : 4;
+    } else if (type.includes('isian')) {
+      base = cat === 'HOTS' ? 8 : cat === 'MOTS' ? 6 : 5;
+    } else if (type.includes('uraian') || type.includes('studi')) {
+      base = cat === 'HOTS' ? 15 : cat === 'MOTS' ? 12 : 10;
+    } else {
+      base = cat === 'HOTS' ? 10 : 5;
+    }
+    return base;
+  });
+
+  const rawSum = rawWeights.reduce((a: number, b: number) => a + b, 0) || n;
+
+  let assignedSum = 0;
+  const scaledWeights = rawWeights.map((w: number, idx: number) => {
+    if (idx === n - 1) {
+      return 0;
+    }
+    const val = Math.round((w / rawSum) * 100);
+    const finalVal = Math.max(1, val);
+    assignedSum += finalVal;
+    return finalVal;
+  });
+
+  const lastVal = Math.max(1, 100 - assignedSum);
+  scaledWeights[n - 1] = lastVal;
+
+  for (let i = 0; i < n; i++) {
+    questions[i].number = i + 1;
+    questions[i].id = questions[i].id || `q-${i + 1}`;
+    questions[i].scoreWeight = scaledWeights[i];
+  }
+
+  return examData;
+}
+
 function parseAiJson(rawText: string) {
   const cleaned = rawText
     .replace(/^```json\s*/i, '')
@@ -763,16 +811,26 @@ function parseAiJson(rawText: string) {
     .replace(/\s*```$/i, '')
     .trim();
 
+  let parsed: any = null;
   try {
-    return JSON.parse(cleaned);
+    parsed = JSON.parse(cleaned);
   } catch {
     const firstBrace = cleaned.indexOf('{');
     const lastBrace = cleaned.lastIndexOf('}');
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      try {
+        parsed = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {
+        // ignore
+      }
     }
+  }
+
+  if (!parsed || !parsed.questions) {
     throw new Error('Format JSON dari AI tidak valid.');
   }
+
+  return normalizeExamWeights(parsed);
 }
 
 function sendSse(res: express.Response, event: string, payload: unknown) {
