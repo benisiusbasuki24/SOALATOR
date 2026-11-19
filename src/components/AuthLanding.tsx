@@ -130,6 +130,23 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({ onCredentialLogin }) =
           </div>
         )}
 
+        <div className="mb-4 flex items-center justify-between bg-blue-500/10 border border-blue-500/20 rounded-2xl p-3.5">
+          <div className="text-xs text-blue-300 space-y-0.5">
+            <div className="font-bold">Akses Cepat Superadmin:</div>
+            <div className="text-slate-300 font-mono text-[11px]">soalator.admin / admin12345</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setIdentifier('soalator.admin');
+              setPassword('admin12345');
+            }}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow"
+          >
+            Isi Otomatis
+          </button>
+        </div>
+
         {/* Username / Email & Password Form */}
         <form onSubmit={handleCredentialSubmit} className="space-y-4">
           <div>
