@@ -82,8 +82,127 @@ function hashPassword(password: string, salt?: string): string {
   return `${usedSalt}:${derived}`;
 }
 
-function getStoredUsers(): StoredUser[] {
-  const users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+function getFirebaseConfig(): { projectId: string; firestoreDatabaseId: string; apiKey: string } {
+  try {
+    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      return {
+        projectId: cfg.projectId || '',
+        firestoreDatabaseId: cfg.firestoreDatabaseId || '',
+        apiKey: cfg.apiKey || '',
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { projectId: '', firestoreDatabaseId: '', apiKey: '' };
+}
+
+const fbConfig = getFirebaseConfig();
+const FIRESTORE_REST_BASE = fbConfig.projectId && fbConfig.firestoreDatabaseId
+  ? `https://firestore.googleapis.com/v1/projects/${fbConfig.projectId}/databases/${fbConfig.firestoreDatabaseId}/documents`
+  : '';
+
+function parseFirestoreUser(doc: any): StoredUser | null {
+  try {
+    const fields = doc?.fields;
+    if (!fields) return null;
+    return {
+      id: fields.id?.stringValue || path.basename(doc.name || ''),
+      username: fields.username?.stringValue || '',
+      email: fields.email?.stringValue || '',
+      displayName: fields.displayName?.stringValue || '',
+      role: (fields.role?.stringValue === 'superadmin' ? 'superadmin' : 'teacher'),
+      schoolName: fields.schoolName?.stringValue || '',
+      active: fields.active?.booleanValue !== false,
+      passwordHash: fields.passwordHash?.stringValue || '',
+      createdAt: fields.createdAt?.stringValue || new Date().toISOString(),
+      lastLogin: fields.lastLogin?.stringValue,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function userToFirestoreFields(u: StoredUser) {
+  return {
+    fields: {
+      id: { stringValue: u.id },
+      username: { stringValue: u.username },
+      email: { stringValue: u.email },
+      displayName: { stringValue: u.displayName },
+      role: { stringValue: u.role },
+      schoolName: { stringValue: u.schoolName || '' },
+      active: { booleanValue: u.active !== false },
+      passwordHash: { stringValue: u.passwordHash },
+      createdAt: { stringValue: u.createdAt || new Date().toISOString() },
+      lastLogin: { stringValue: u.lastLogin || '' },
+    },
+  };
+}
+
+async function syncUsersToFirestore(users: StoredUser[]) {
+  if (!FIRESTORE_REST_BASE) return;
+  for (const u of users) {
+    try {
+      await fetch(`${FIRESTORE_REST_BASE}/users/${u.id}?updateMask.fieldPaths=id&updateMask.fieldPaths=username&updateMask.fieldPaths=email&updateMask.fieldPaths=displayName&updateMask.fieldPaths=role&updateMask.fieldPaths=schoolName&updateMask.fieldPaths=active&updateMask.fieldPaths=passwordHash&updateMask.fieldPaths=createdAt&updateMask.fieldPaths=lastLogin`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(userToFirestoreFields(u)),
+      });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function fetchUsersFromFirestore(): Promise<StoredUser[]> {
+  if (!FIRESTORE_REST_BASE) return [];
+  try {
+    const resp = await fetch(`${FIRESTORE_REST_BASE}/users`);
+    if (!resp.ok) return [];
+    const data: any = await resp.json();
+    const docs = data?.documents || [];
+    const list: StoredUser[] = [];
+    for (const d of docs) {
+      const parsed = parseFirestoreUser(d);
+      if (parsed) list.push(parsed);
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+async function deleteUserFromFirestore(userId: string) {
+  if (!FIRESTORE_REST_BASE) return;
+  try {
+    await fetch(`${FIRESTORE_REST_BASE}/users/${userId}`, {
+      method: 'DELETE',
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function getStoredUsers(): Promise<StoredUser[]> {
+  let users = readJsonFile<StoredUser[]>(USERS_FILE, []);
+  try {
+    const remoteUsers = await fetchUsersFromFirestore();
+    if (remoteUsers.length > 0) {
+      const map = new Map<string, StoredUser>();
+      for (const u of users) map.set(u.id, u);
+      for (const r of remoteUsers) {
+        map.set(r.id, r);
+      }
+      users = Array.from(map.values());
+      writeJsonFile(USERS_FILE, users);
+    }
+  } catch {
+    // ignore
+  }
+
   const adminIndex = users.findIndex((u) => u.username.toLowerCase() === 'soalator.admin');
   const defaultAdminHash = hashPassword('admin12345');
   if (adminIndex === -1) {
@@ -100,11 +219,13 @@ function getStoredUsers(): StoredUser[] {
     };
     users.unshift(adminUser);
     writeJsonFile(USERS_FILE, users);
+    syncUsersToFirestore([adminUser]);
   } else {
     if (users[adminIndex].role !== 'superadmin' || !users[adminIndex].active) {
       users[adminIndex].role = 'superadmin';
       users[adminIndex].active = true;
       writeJsonFile(USERS_FILE, users);
+      syncUsersToFirestore([users[adminIndex]]);
     }
   }
   return users;
@@ -203,7 +324,7 @@ async function resolveAuthUser(req: express.Request): Promise<AuthenticatedUser 
   if (token.startsWith('local.')) {
     const session = verifySessionToken(token);
     if (!session) return null;
-    const users = getStoredUsers();
+    const users = await getStoredUsers();
     const found = users.find((u) => u.id === session.uid);
     if (!found || !found.active) return null;
     return {
@@ -241,7 +362,7 @@ const defaultApiKey = process.env.GEMINI_API_KEY || '';
 
 // --- Credential Auth Endpoints ---
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { identifier, password } = req.body || {};
   const cleanIdentifier = String(identifier || '').trim().toLowerCase();
   const rawPassword = String(password || '');
@@ -250,7 +371,7 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(400).json({ error: 'Username/Email dan kata sandi wajib diisi.' });
   }
 
-  const users = getStoredUsers();
+  const users = await getStoredUsers();
   const userIndex = users.findIndex(
     (u) =>
       u.username.toLowerCase() === cleanIdentifier ||
@@ -311,7 +432,7 @@ app.get('/api/admin/users', async (req, res) => {
   if (!authUser || authUser.role !== 'superadmin') {
     return res.status(403).json({ error: 'Akses ditolak. Hanya Superadmin yang diizinkan.' });
   }
-  const users = getStoredUsers();
+  const users = await getStoredUsers();
   return res.json({ users: users.map(sanitizeUser) });
 });
 
@@ -341,7 +462,7 @@ app.post('/api/admin/users', async (req, res) => {
     return res.status(400).json({ error: 'Kata sandi minimal 6 karakter.' });
   }
 
-  const users = getStoredUsers();
+  const users = await getStoredUsers();
   const duplicate = users.find(
     (u) =>
       u.username.toLowerCase() === cleanUsername.toLowerCase() ||
@@ -365,6 +486,7 @@ app.post('/api/admin/users', async (req, res) => {
 
   users.unshift(newUser);
   writeJsonFile(USERS_FILE, users);
+  syncUsersToFirestore([newUser]);
 
   return res.status(201).json({ user: sanitizeUser(newUser) });
 });
@@ -376,7 +498,7 @@ app.patch('/api/admin/users/:id', async (req, res) => {
   }
 
   const targetId = req.params.id;
-  const users = getStoredUsers();
+  const users = await getStoredUsers();
   const idx = users.findIndex((u) => u.id === targetId);
   if (idx === -1) {
     return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
@@ -398,6 +520,7 @@ app.patch('/api/admin/users/:id', async (req, res) => {
 
   users[idx] = updated;
   writeJsonFile(USERS_FILE, users);
+  syncUsersToFirestore([updated]);
 
   return res.json({ user: sanitizeUser(updated) });
 });
@@ -409,13 +532,14 @@ app.delete('/api/admin/users/:id', async (req, res) => {
   }
 
   const targetId = req.params.id;
-  const users = getStoredUsers();
+  const users = await getStoredUsers();
   const nextUsers = users.filter((u) => u.id !== targetId);
   if (nextUsers.length === users.length) {
     return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
   }
 
   writeJsonFile(USERS_FILE, nextUsers);
+  deleteUserFromFirestore(targetId);
   return res.json({ deleted: true });
 });
 
