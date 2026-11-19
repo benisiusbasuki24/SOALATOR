@@ -9,33 +9,31 @@ interface ExamFormProps {
 
 export const ExamForm: React.FC<ExamFormProps> = ({ onGenerate, isLoading }) => {
   const [schoolIdentity, setSchoolIdentity] = useState<SchoolIdentity>({
-    namaSekolah: 'SMA Negeri 1 Teladan',
-    mataPelajaran: 'Matematika Peminatan',
-    guruPengampu: 'Drs. H. Budi Santoso, M.Pd.',
-    kelas: 'XI MIPA',
+    namaSekolah: 'SD BOPKRI Gondolayu Yogyakarta',
+    mataPelajaran: 'Matematika',
+    guruPengampu: 'Tim Pengajar',
+    kelas: '1.1',
     semester: 'Ganjil',
     kkm: '75',
     tanggalUjian: '24 November 2026',
     hariUjian: 'Senin',
     jamUjian: '08.00 - 09.30',
-    durasiUjian: '90 Menit',
+    durasiUjian: '60 Menit',
   });
 
   const [examCategory, setExamCategory] = useState<string>('Ulangan Harian 1');
   const [selectedModel, setSelectedModel] = useState<'gemini' | 'claude' | 'chatgpt'>('gemini');
 
-  const [selectedTypes, setSelectedTypes] = useState<string[]>(['Pilihan Ganda', 'Uraian']);
+  const [selectedTypes, setSelectedTypes] = useState<string[]>(['Pilihan Ganda', 'Isian Singkat', 'Uraian']);
 
   const [typeSettings, setTypeSettings] = useState<{ [key: string]: TypeDifficulty }>({
-    'Pilihan Ganda': { hotsCount: 2, motsCount: 3, lotsCount: 2, total: 7 },
-    'Isian Singkat': { hotsCount: 1, motsCount: 1, lotsCount: 1, total: 3 },
-    'Uraian': { hotsCount: 2, motsCount: 1, lotsCount: 1, total: 4 },
+    'Pilihan Ganda': { hotsCount: 2, motsCount: 5, lotsCount: 3, total: 10 },
+    'Isian Singkat': { hotsCount: 2, motsCount: 5, lotsCount: 3, total: 10 },
+    'Uraian': { hotsCount: 2, motsCount: 2, lotsCount: 1, total: 5 },
     'Studi Kasus': { hotsCount: 1, motsCount: 0, lotsCount: 0, total: 1 },
   });
 
-  const [materialText, setMaterialText] = useState<string>(
-    'Materi: Turunan Fungsi Aljabar dan Penerapannya berbasis Pendekatan Deep Learning. Mengintegrasikan nilai-nilai kebopkrian (Kasih dalam kolaborasi pemecahan masalah, Integritas dalam kejujuran akademik, dan Pelayanan yang Tulus dalam membantu rekan sejawat).'
-  );
+  const [materialText, setMaterialText] = useState<string>('matematika sederhana');
 
   const [fileName, setFileName] = useState<string>('');
 

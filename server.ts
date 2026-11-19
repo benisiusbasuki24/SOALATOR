@@ -836,7 +836,7 @@ app.post('/api/generate-soal-stream', async (req, res) => {
 
       try {
         const stream = await ai.models.generateContentStream({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.8-flash',
           contents: prompt,
           config: {
             responseMimeType: 'application/json',
@@ -947,7 +947,7 @@ app.post('/api/generate-soal', async (req, res) => {
     let response;
     try {
       response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',

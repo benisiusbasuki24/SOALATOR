@@ -66,7 +66,26 @@ export const ExamPreview: React.FC<ExamPreviewProps> = ({ exam, onSave, onBack, 
     const element = document.getElementById('printable-exam-area');
     if (!element) return;
     try {
-      const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        onclone: (clonedDoc) => {
+          const allEls = clonedDoc.querySelectorAll('*');
+          allEls.forEach((el) => {
+            try {
+              const style = window.getComputedStyle(el);
+              ['color', 'background-color', 'border-color'].forEach((prop) => {
+                const val = style.getPropertyValue(prop);
+                if (val && val.includes('oklch')) {
+                  (el as HTMLElement).style.setProperty(prop, '#1e293b');
+                }
+              });
+            } catch {
+              // ignore
+            }
+          });
+        },
+      });
       const imgData = canvas.toDataURL('image/png');
       const pdf = new jsPDF('p', 'mm', 'a4');
       const imgWidth = 210;
