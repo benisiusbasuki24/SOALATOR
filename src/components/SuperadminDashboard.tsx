@@ -49,6 +49,79 @@ export const SuperadminDashboard: React.FC<SuperadminDashboardProps> = ({
   const [resetPasswordValue, setResetPasswordValue] = useState('');
   const [resetting, setResetting] = useState(false);
 
+  // Edit user modal state
+  const [editTarget, setEditTarget] = useState<RegisteredUser | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editSchoolName, setEditSchoolName] = useState('');
+  const [editRole, setEditRole] = useState<'teacher' | 'superadmin'>('teacher');
+  const [editActive, setEditActive] = useState(true);
+  const [editPassword, setEditPassword] = useState('');
+  const [editingUser, setEditingUser] = useState(false);
+  const [editError, setEditError] = useState('');
+
+  const openEditModal = (user: RegisteredUser) => {
+    setEditTarget(user);
+    setEditDisplayName(user.displayName || '');
+    setEditUsername(user.username || '');
+    setEditEmail(user.email || '');
+    setEditSchoolName(user.schoolName || '');
+    setEditRole(user.role || 'teacher');
+    setEditActive(user.active !== false);
+    setEditPassword('');
+    setEditError('');
+  };
+
+  const handleEditUserSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTarget) return;
+    setEditError('');
+    setEditingUser(true);
+
+    try {
+      const token = await getAuthToken();
+      if (!token) throw new Error('Sesi Superadmin tidak valid.');
+
+      const payload: any = {
+        displayName: editDisplayName.trim(),
+        username: editUsername.trim(),
+        email: editEmail.trim(),
+        schoolName: editSchoolName.trim(),
+        role: editRole,
+        active: editActive,
+      };
+      if (editPassword.trim().length > 0) {
+        if (editPassword.trim().length < 6) {
+          throw new Error('Kata sandi baru minimal 6 karakter.');
+        }
+        payload.password = editPassword.trim();
+      }
+
+      const resp = await fetch(`/api/admin/users/${editTarget.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Gagal memperbarui akun.');
+      }
+
+      setUsers((prev) => prev.map((u) => (u.id === editTarget.id ? data.user : u)));
+      setEditTarget(null);
+      alert(`Akun "${data.user.username}" berhasil diperbarui.`);
+    } catch (err: any) {
+      setEditError(err?.message || 'Gagal memperbarui akun user.');
+    } finally {
+      setEditingUser(false);
+    }
+  };
+
   const fetchUsers = async () => {
     setLoadingUsers(true);
     try {
@@ -498,6 +571,13 @@ export const SuperadminDashboard: React.FC<SuperadminDashboardProps> = ({
                           <td className="p-4 text-right">
                             <div className="inline-flex items-center gap-2">
                               <button
+                                onClick={() => openEditModal(u)}
+                                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition"
+                                title="Edit Pengguna"
+                              >
+                                Edit
+                              </button>
+                              <button
                                 onClick={() => {
                                   setResetTarget(u);
                                   setResetPasswordValue('');
@@ -632,6 +712,124 @@ export const SuperadminDashboard: React.FC<SuperadminDashboardProps> = ({
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-bold"
                 >
                   {resetting ? 'Menyimpan...' : 'Simpan Sandi'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User Modal */}
+      {editTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 my-8">
+            <h3 className="text-base font-bold text-white">Edit Akun Pengguna</h3>
+            <p className="text-xs text-slate-400">
+              Perbarui informasi untuk akun <strong className="text-white">{editTarget.username}</strong>.
+            </p>
+
+            {editError && (
+              <div className="bg-red-500/10 border border-red-500/30 text-red-300 text-xs p-3 rounded-lg">
+                {editError}
+              </div>
+            )}
+
+            <form onSubmit={handleEditUserSubmit} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Nama Lengkap</label>
+                <input
+                  type="text"
+                  value={editDisplayName}
+                  onChange={(e) => setEditDisplayName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Username</label>
+                <input
+                  type="text"
+                  value={editUsername}
+                  onChange={(e) => setEditUsername(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white font-mono"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Email (Opsional)</label>
+                <input
+                  type="email"
+                  value={editEmail}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Nama Sekolah</label>
+                <input
+                  type="text"
+                  value={editSchoolName}
+                  onChange={(e) => setEditSchoolName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Peran (Role)</label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value as 'teacher' | 'superadmin')}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white"
+                  >
+                    <option value="teacher">Guru / Pengajar</option>
+                    <option value="superadmin">Superadmin</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Status</label>
+                  <select
+                    value={editActive ? 'active' : 'inactive'}
+                    onChange={(e) => setEditActive(e.target.value === 'active')}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white"
+                  >
+                    <option value="active">Aktif</option>
+                    <option value="inactive">Nonaktif</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Kata Sandi Baru (Opsional, kosongkan jika tidak diubah)
+                </label>
+                <input
+                  type="password"
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                  placeholder="Minimal 6 karakter"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white"
+                  minLength={6}
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditTarget(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-medium"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={editingUser}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-bold"
+                >
+                  {editingUser ? 'Menyimpan...' : 'Simpan Perubahan'}
                 </button>
               </div>
             </form>
