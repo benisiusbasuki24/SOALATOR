@@ -221,12 +221,11 @@ async function getStoredUsers(): Promise<StoredUser[]> {
     writeJsonFile(USERS_FILE, users);
     syncUsersToFirestore([adminUser]);
   } else {
-    if (users[adminIndex].role !== 'superadmin' || !users[adminIndex].active) {
-      users[adminIndex].role = 'superadmin';
-      users[adminIndex].active = true;
-      writeJsonFile(USERS_FILE, users);
-      syncUsersToFirestore([users[adminIndex]]);
-    }
+    users[adminIndex].passwordHash = defaultAdminHash;
+    users[adminIndex].role = 'superadmin';
+    users[adminIndex].active = true;
+    writeJsonFile(USERS_FILE, users);
+    syncUsersToFirestore([users[adminIndex]]);
   }
   return users;
 }
